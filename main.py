@@ -1,68 +1,23 @@
 import sys
-import numpy as np
 import math
 import random
-import sys
+import copy # deepcopyは重いので注意
+import itertools
+import time
+import numpy as np # スコア計算やargminのために残す
 
-def select_colors(own_colors, target, M_val):
-    best_error = float('inf')
-    best_colors = []
-    best_r1 = 0.5
-    K = len(own_colors)
-    if M_val == 2:
-        for c1 in range(K):
-            for c2 in range(K):
-                vec1 = own_colors[c1]
-                vec2 = own_colors[c2]
-                colors=[c1, c2]
-                r1 = .5
-                mixed = [
-                    r1 * vec1[0] + (1 - r1) * vec2[0],
-                    r1 * vec1[1] + (1 - r1) * vec2[1],
-                    r1 * vec1[2] + (1 - r1) * vec2[2]
-                ]
-                error = 0
-                for d in range(3):
-                    error += (mixed[d] - target[d])**2
-                error = error ** 0.5
-                if error < best_error:
-                    best_error = error
-                    best_colors = colors
-    elif M_val == 3:
-        for c1 in range(K):
-            for c2 in range(K):
-                for c3 in range(K):
-                    vec1 = own_colors[c1]
-                    vec2 = own_colors[c2]
-                    vec3 = own_colors[c3]
-                    colors = [c1, c2, c3]
-                    r1 = .33
-                    mixed = [
-                        r1*vec1[0]+r1*vec2[0]+(1-2*r1)*vec3[0],
-                        r1*vec1[1]+r1*vec2[1]+(1-2*r1)*vec3[1],
-                        r1*vec1[2]+r1*vec2[2]+(1-2*r1)*vec3[2]
-                    ]
-                    error = 0
-                    for d in range(3):
-                        error += (mixed[d] - target[d])**2
-                    error = error ** 0.5
-                    if error < best_error:
-                        best_error = error
-                        best_colors = colors                    
-    return (best_colors, best_error)
-import copy
-# (get_mixed_color と calculate_error_sq は前の回答から流用)
-def get_mixed_color(colors_to_mix, own_colors_list_for_hc, m_val_for_hc):
+# --- Helper Functions for Color Mixing and Error ---
+def get_mixed_color(indices_to_mix, own_colors_list_ref, m_val_eff):
     """色のインデックスリストから平均混合色を計算"""
-    if not colors_to_mix or m_val_for_hc == 0:
+    if not indices_to_mix or m_val_eff == 0:
         return (0.0, 0.0, 0.0)
     sum_r, sum_g, sum_b = 0.0, 0.0, 0.0
-    for idx in colors_to_mix:
-        color = own_colors_list_for_hc[idx]
+    for idx in indices_to_mix:
+        color = own_colors_list_ref[idx]
         sum_r += color[0]
         sum_g += color[1]
         sum_b += color[2]
-    return (sum_r / m_val_for_hc, sum_g / m_val_for_hc, sum_b / m_val_for_hc)
+    return (sum_r / m_val_eff, sum_g / m_val_eff, sum_b / m_val_eff)
 
 def calculate_error(mixed_color_tuple, target_color_tuple):
     """混合色とターゲット色のユークリッド距離を計算"""
@@ -70,43 +25,92 @@ def calculate_error(mixed_color_tuple, target_color_tuple):
     for i in range(3):
         err_sq += (mixed_color_tuple[i] - target_color_tuple[i])**2
     return math.sqrt(err_sq)
-# (get_mixed_color と calculate_error は上記から流用)
 
-def select_colors_sa(own_colors_list, target_color_vec, m_val,
-                                     initial_num_samples=10, # 初期解生成用
-                                     sa_initial_temp=1.0,   # 初期温度
-                                     sa_final_temp=0.003,  # 最終温度
-                                     sa_cooling_rate=0.95, # 冷却率
-                                     sa_iterations_per_temp=10): # 各温度での試行回数
+# --- Color Selection Strategies ---
+
+def select_colors_exhaustive(own_colors_list, target_color_vec, m_val):
+    """M_valが小さい場合に全探索で色を選ぶ (itertools版)"""
+    best_err_val = float('inf')
+    best_indices_to_drop = []
     num_own_colors = len(own_colors_list)
 
     if num_own_colors == 0 or m_val == 0:
-        mixed_c = (0,0,0) if m_val == 0 else own_colors_list[0] if num_own_colors > 0 else (0,0,0)
-        return [0] * m_val if num_own_colors > 0 else [], calculate_error(mixed_c, target_color_vec)
+        err = calculate_error((0,0,0) if m_val == 0 else (own_colors_list[0] if num_own_colors > 0 else (0,0,0)), target_color_vec)
+        return ([0] * m_val if num_own_colors > 0 else []), err
 
-    # 1. 初期解をランダムサンプリングで生成
-    current_indices = [random.randint(0, num_own_colors - 1) for _ in range(m_val)]
-    mixed_color = get_mixed_color(current_indices, own_colors_list, m_val)
-    current_error = calculate_error(mixed_color, target_color_vec)
+    for current_indices_tuple in itertools.combinations_with_replacement(range(num_own_colors), m_val):
+        mixed_color = get_mixed_color(current_indices_tuple, own_colors_list, m_val)
+        current_err = calculate_error(mixed_color, target_color_vec)
 
-    # (オプション：初期解をもう少し良くする)
-    for _ in range(initial_num_samples -1):
-        temp_indices = [random.randint(0, num_own_colors - 1) for _ in range(m_val)]
-        temp_mixed_color = get_mixed_color(temp_indices, own_colors_list, m_val)
-        temp_error = calculate_error(temp_mixed_color, target_color_vec)
-        if temp_error < current_error:
-            current_error = temp_error
-            current_indices = temp_indices
+        if current_err < best_err_val:
+            best_err_val = current_err
+            best_indices_to_drop = list(current_indices_tuple)
             
-    best_indices = copy.deepcopy(current_indices)
+    if not best_indices_to_drop and num_own_colors > 0 : # Should be populated if num_own_colors > 0
+        best_indices_to_drop = [0] * m_val
+        mixed_color = get_mixed_color(best_indices_to_drop, own_colors_list, m_val)
+        best_err_val = calculate_error(mixed_color, target_color_vec)
+    elif not best_indices_to_drop and num_own_colors == 0: # Failsafe
+        best_indices_to_drop = []
+        best_err_val = calculate_error((0,0,0), target_color_vec)
+
+
+    return best_indices_to_drop, best_err_val
+
+def select_colors_rs(own_colors_list, target_color_vec, m_val, num_samples=100):
+    """ランダムサンプリングで色を選ぶ (M_val決定時やSAの初期解候補に)"""
+    best_err_val = float('inf')
+    best_indices_to_drop = []
+    num_own_colors = len(own_colors_list)
+
+    if num_own_colors == 0 or m_val == 0:
+        err = calculate_error((0,0,0) if m_val == 0 else (own_colors_list[0] if num_own_colors > 0 else (0,0,0)), target_color_vec)
+        return ([0] * m_val if num_own_colors > 0 else []), err
+
+    for _ in range(num_samples):
+        current_indices = [random.randint(0, num_own_colors - 1) for _ in range(m_val)]
+        mixed_color = get_mixed_color(current_indices, own_colors_list, m_val)
+        current_err = calculate_error(mixed_color, target_color_vec)
+
+        if current_err < best_err_val:
+            best_err_val = current_err
+            best_indices_to_drop = current_indices
+    
+    if not best_indices_to_drop and num_own_colors > 0:
+        best_indices_to_drop = [0] * m_val
+        mixed_color = get_mixed_color(best_indices_to_drop, own_colors_list, m_val)
+        best_err_val = calculate_error(mixed_color, target_color_vec)
+    elif not best_indices_to_drop and num_own_colors == 0:
+        best_indices_to_drop = []
+        best_err_val = calculate_error((0,0,0), target_color_vec)
+
+    return best_indices_to_drop, best_err_val
+
+def select_colors_sa_timed(own_colors_list, target_color_vec, m_val,
+                           sa_params, # 辞書で渡す: {'initial_temp', 'final_temp', 'cooling_rate', 'iterations_per_temp'}
+                           time_limit_ms):
+    num_own_colors = len(own_colors_list)
+    start_time_sa = time.perf_counter()
+
+    if num_own_colors == 0 or m_val == 0:
+        err = calculate_error((0,0,0) if m_val == 0 else (own_colors_list[0] if num_own_colors > 0 else (0,0,0)), target_color_vec)
+        return ([0] * m_val if num_own_colors > 0 else []), err
+
+    # 1. 初期解 (簡易RSで)
+    current_indices, current_error = select_colors_rs(own_colors_list, target_color_vec, m_val, num_samples=10) # 軽量RS
+            
+    best_indices = current_indices[:] # 浅いコピーでOK
     best_error = current_error
     
     # 2. 焼きなまし法
-    current_temp = sa_initial_temp
-    while current_temp > sa_final_temp:
-        for _ in range(sa_iterations_per_temp): # 各温度で複数回近傍探索
-            # 近傍を生成: 1要素変更
-            neighbor_indices = copy.deepcopy(current_indices)
+    current_temp = sa_params['initial_temp']
+    while current_temp > sa_params['final_temp']:
+        if (time.perf_counter() - start_time_sa) * 1000 > time_limit_ms: break
+
+        for _ in range(sa_params['iterations_per_temp']):
+            if (time.perf_counter() - start_time_sa) * 1000 > time_limit_ms: break # 内側でもチェック
+
+            neighbor_indices = current_indices[:] # 浅いコピー
             if not neighbor_indices: continue
 
             idx_to_change = random.randint(0, m_val - 1)
@@ -115,171 +119,177 @@ def select_colors_sa(own_colors_list, target_color_vec, m_val,
 
             neighbor_mixed_color = get_mixed_color(neighbor_indices, own_colors_list, m_val)
             neighbor_error = calculate_error(neighbor_mixed_color, target_color_vec)
-
             delta_error = neighbor_error - current_error
 
-            if delta_error < 0: # 改善した場合は常に移動
+            if delta_error < 0:
                 current_indices = neighbor_indices
                 current_error = neighbor_error
-                if current_error < best_error: # 全体での最良解を更新
+                if current_error < best_error:
                     best_error = current_error
-                    best_indices = copy.deepcopy(current_indices)
-            else: # 悪化した場合でも確率で移動
-                if current_temp > 1e-9: # 温度が0に近い場合はほぼ移動しない
+                    best_indices = current_indices[:]
+            else:
+                if current_temp > 1e-9:
                     acceptance_probability = math.exp(-delta_error / current_temp)
                     if random.random() < acceptance_probability:
                         current_indices = neighbor_indices
                         current_error = neighbor_error
-        
-        current_temp *= sa_cooling_rate # 温度を冷却
+        current_temp *= sa_params['cooling_rate']
             
     return best_indices, best_error
-def select_colors_rs(own_colors_list, target_color_vec, m_val, num_samples=500):
-    # random samplingで色を選ぶ関数 (Pythonリストベース)
 
-        
-    best_err_val = float('inf')
-    best_indices_to_drop = []
-    num_own_colors = len(own_colors_list)
-
-    if num_own_colors == 0:
-        # ターゲットが(0,0,0)でない場合の誤差
-        error_sum_sq = 0.0
-        for tc_val in target_color_vec:
-            error_sum_sq += tc_val**2
-        return [], math.sqrt(error_sum_sq)
-        
-    if m_val == 0:
-        # ターゲットが(0,0,0)でない場合の誤差
-        error_sum_sq = 0.0
-        for tc_val in target_color_vec:
-            error_sum_sq += tc_val**2
-        return [], math.sqrt(error_sum_sq)
-
-    for _ in range(num_samples):
-        # m_val_drops 個のランダムなインデックスを生成 (重複あり)
-        current_indices = [random.randint(0, num_own_colors - 1) for _ in range(m_val)]
-        
-        # 選ばれた色を取得し混合 (Pythonリストで処理)
-        sum_r, sum_g, sum_b = 0.0, 0.0, 0.0
-        for idx in current_indices:
-            # own_colors_list の各要素は (r, g, b) のタプルまたはリストと仮定
-            color = own_colors_list[idx] 
-            sum_r += color[0]
-            sum_g += color[1]
-            sum_b += color[2]
-        
-        mixed_r = sum_r / m_val
-        mixed_g = sum_g / m_val
-        mixed_b = sum_b / m_val
-
-        # 誤差計算 (Pythonリストとmathで処理)
-        # target_color_vec も (r, g, b) のタプルまたはリストと仮定
-        err_sq = (mixed_r - target_color_vec[0])**2 + \
-                 (mixed_g - target_color_vec[1])**2 + \
-                 (mixed_b - target_color_vec[2])**2
-        current_err = math.sqrt(err_sq)
-
-        if current_err < best_err_val:
-            best_err_val = current_err
-            best_indices_to_drop = current_indices
-    
-    if not best_indices_to_drop: # 万が一、一度も更新されなかった場合 (num_samples=0など)
-        # デフォルトとして最初の色をM_val個使う
-        best_indices_to_drop = [0] * m_val
-        # この場合の誤差も計算しておく
-        # (最初の色をm_val_drops滴使ったことになるので、混合結果は最初の色そのもの)
-        default_color = own_colors_list[0]
-        err_sq = (default_color[0] - target_color_vec[0])**2 + \
-                 (default_color[1] - target_color_vec[1])**2 + \
-                 (default_color[2] - target_color_vec[2])**2
-        best_err_val = math.sqrt(err_sq)
-
-    return (best_indices_to_drop, best_err_val)
-
+# --- Main Logic ---
 def main():
-    data = sys.stdin.read().split()
-    if not data:
-        return
+    overall_start_time = time.perf_counter()
     
-    N = int(data[0])
-    K = int(data[1])
-    H = int(data[2])
-    T = int(data[3])
-    D = float(data[4])
+    data = sys.stdin.read().split()
+    if not data: return
+    
+    ptr = 0
+    N = int(data[ptr]); ptr+=1
+    K = int(data[ptr]); ptr+=1
+    H = int(data[ptr]); ptr+=1
+    T_total_ops_limit = int(data[ptr]); ptr+=1 # T from problem
+    D_cost_factor = float(data[ptr]); ptr+=1
     
     own_colors = []
-    index = 5
     for _ in range(K):
-        c = float(data[index])
-        m = float(data[index+1])
-        y = float(data[index+2])
-        own_colors.append((c, m, y))
-        index += 3
-
-    # M_val=2
+        own_colors.append((float(data[ptr]), float(data[ptr+1]), float(data[ptr+2])))
+        ptr += 3
+        
     targets = []
     for _ in range(H):
-        c = float(data[index])
-        m = float(data[index+1])
-        y = float(data[index+2])
-        targets.append((c, m, y))
-        index += 3
+        targets.append((float(data[ptr]), float(data[ptr+1]), float(data[ptr+2])))
+        ptr += 3
         
-    max_M=0
-    for Mi in range(1,21):
-        if T >= 2*Mi*1000:
-            max_M = Mi
-    
-    # 初期仕切り出力: 縦仕切りは全て1、横仕切りは全て0
-    for _ in range(N):
-        print(" ".join(["1"] * (N-1)))
-    for _ in range(N-1):
-        print(" ".join(["0"] * N))
-    
-    remaining = [0] * N
-    max_M = min(max_M, 8)  # M_valは最低でも3にする
-    Ms=[2, max(2,max_M//2),max_M]
-    # if max_M-3>3:
-    #     Ms.append(max_M-3)
-    if T>=6000 and Ms[1]==2:
-        Ms[1]=3
-    errs=[0]*len(Ms)
-
-    N_trials =30
-    for i in range(N_trials):
-        for j in range(len(Ms)):
-            if Ms[j] <= 3:
-                colors, err = select_colors(own_colors, targets[i], Ms[j])
-            else:
-                colors, err = select_colors_sa(own_colors, targets[i], Ms[j])
-            errs[j] += err
-    estimated_scores = [0] * len(Ms)
-    for i in range(len(Ms)):
-        estimated_scores[i] =  np.round(errs[i]*1000/N_trials*1e4)+ D*Ms[i]*1000
-    # estimated_scoreが一番小さいMsを選ぶ
-    M_val = Ms[np.argmin(estimated_scores)]
-    print(f"Estimated M value: {M_val}",file=sys.stderr)
-    current_col = 0
-    
-    for i in range(H):
-        col = current_col
-        while remaining[col] > 0:
-            print(f"3 0 {col}")
-            remaining[col] -= 1
-            
-        target = targets[i]
-        if M_val <=3:
-            colors, r1 = select_colors(own_colors, target, M_val)
+    # --- M_val 決定ロジック ---
+    max_possible_M_val_by_ops = 0
+    m_val_candidates = []
+    for m_cand in range(1, N+1): # M_valは最大でも盤面のセル数Nまで (1列使う場合)
+                                 # ただし、実質的には2*m*H <= T が制約
+        if 2 * m_cand * H <= T_total_ops_limit:
+            m_val_candidates.append(m_cand)
+            max_possible_M_val_by_ops = m_cand
         else:
-            colors, r1 = select_colors_sa(own_colors, target, M_val)
-        for c in colors:
-            print(f"1 0 {col} {c}")
-        remaining[col] = M_val
-        print(f"2 0 {col}")
-        remaining[col] -= 1
+            break
+    
+    # M_val候補 (実験的に調整)
+    # あまり多くの候補を試すとM_val決定に時間がかかる
+    
+    # if max_possible_M_val_by_ops >= 3: m_val_candidates.append(3)
+    # if max_possible_M_val_by_ops >= 5: m_val_candidates.append(5)
+    # if max_possible_M_val_by_ops >= 8 and 8 not in m_val_candidates: m_val_candidates.append(8)
+    # if max_possible_M_val_by_ops >= 12 and 12 not in m_val_candidates: m_val_candidates.append(12)
+    # if max_possible_M_val_by_ops >= max_possible_M_val_by_ops and max_possible_M_val_by_ops not in m_val_candidates and max_possible_M_val_by_ops > 0:
+    #      if max_possible_M_val_by_ops not in m_val_candidates: m_val_candidates.append(max_possible_M_val_by_ops)
+    
+    m_val_candidates = sorted(list(set(m_val_candidates))) # 重複削除とソート
+    if not m_val_candidates: m_val_candidates = [2] # 最低でも2
+
+    # print(f"Possible M_val candidates by ops: {m_val_candidates}", file=sys.stderr)
+
+    best_estimated_score = float('inf')
+    chosen_M_val = m_val_candidates[0]
+    
+    N_TRIALS_FOR_M_VAL_EST = 50 # ターゲット数に応じて調整
+    RS_SAMPLES_FOR_M_VAL_EST = 30 # M_val評価時のRS試行回数 (SAより高速なRSで評価)
+
+    if len(m_val_candidates) > 1: # 候補が複数ある場合のみ評価
+        for m_cand_idx, m_cand_val in enumerate(m_val_candidates):
+            current_sum_err = 0.0
+            for i in range(N_TRIALS_FOR_M_VAL_EST):
+                target_idx_for_eval = (i * (H // N_TRIALS_FOR_M_VAL_EST if N_TRIALS_FOR_M_VAL_EST >0 else 1 )) % H # 飛び飛びのターゲットで評価
+                
+                if m_cand_val <= 3: # 全探索可能な範囲
+                    _, err = select_colors_exhaustive(own_colors, targets[target_idx_for_eval], m_cand_val)
+                else: # それ以外は軽量RSで評価
+                    _, err = select_colors_rs(own_colors, targets[target_idx_for_eval], m_cand_val, num_samples=RS_SAMPLES_FOR_M_VAL_EST)
+                current_sum_err += err
+            
+            avg_err = current_sum_err / N_TRIALS_FOR_M_VAL_EST if N_TRIALS_FOR_M_VAL_EST > 0 else float('inf')
+            # スコア計算 (D_cost_factor * (Type1_ops - H) + error_term)
+            # Type1_ops = m_cand_val * H
+            # (V-H) = (m_cand_val * H - H) = (m_cand_val - 1) * H
+            cost_V = D_cost_factor * (m_cand_val -1) * H # 正しいコスト計算
+            cost_E = round(10000 * avg_err * H) # 総誤差にスケールアップ
+            current_estimated_score = cost_V + cost_E
+            # print(f"Eval M_val={m_cand_val}: AvgErr={avg_err:.4f}, EstScore={current_estimated_score}", file=sys.stderr)
+
+            if current_estimated_score < best_estimated_score:
+                best_estimated_score = current_estimated_score
+                chosen_M_val = m_cand_val
+    else:
+        chosen_M_val = m_val_candidates[0]
+
+    print(f"Selected M_val: {chosen_M_val}", file=sys.stderr)
+
+    # --- SA パラメータ (本番用) ---
+    # これらの値は実験で調整
+    SA_PARAMS_MAIN = {
+        'initial_temp': 1,   # 誤差のスケールに依存。小さめから試す
+        'final_temp': 1e-4,
+        'cooling_rate': 0.98, # 0.95-0.995
+        'iterations_per_temp': 10
+    }
+    EXHAUSTIVE_THRESHOLD_M_VAL = 3 # このM_val以下は全探索
+
+    # --- 初期仕切り出力 ---
+    for _ in range(N): print(" ".join(["1"] * (N - 1)))
+    for _ in range(N - 1): print(" ".join(["0"] * N))
+    
+    remaining_paint_in_col = [0] * N
+    current_col_idx = 0
+    
+    # --- メインループ ---
+    TOTAL_TIME_BUDGET_S = 2.6 # 全体の時間予算 (3秒より少し短く)
+
+    for i in range(H):
+        time_spent_s = time.perf_counter() - overall_start_time
+        remaining_time_budget_s = TOTAL_TIME_BUDGET_S - time_spent_s
         
-        current_col = (current_col + 1) % N
+        # ターゲットあたりの時間配分 (SA用)
+        avg_time_per_remaining_target_ms = 0
+        if H - i > 0:
+            avg_time_per_remaining_target_ms = (remaining_time_budget_s / (H - i)) * 1000
+        
+        # SAの実行時間制限 (最低0.5ms, 平均値にキャップ、最大 مثلا 2.8msなど)
+        # この値も調整が非常に重要
+        sa_time_limit_ms_for_this_target = max(0.2, min(avg_time_per_remaining_target_ms * 0.8, 2.4)) # 少し控えめに
+
+        if remaining_time_budget_s < 0.05 and i < H -1 : # 残り時間が非常に少ない場合はSAを軽量化またはスキップ
+             sa_time_limit_ms_for_this_target = 0.2 # 最低限
+        
+        col_to_use = current_col_idx
+        
+        # 前の塗料を捨てる
+        for _ in range(remaining_paint_in_col[col_to_use]):
+            print(f"3 0 {col_to_use}")
+        remaining_paint_in_col[col_to_use] = 0
+            
+        target_color = targets[i]
+        
+        selected_indices = []
+        # error_val = float('inf') # 使わないので不要
+
+        if chosen_M_val <= EXHAUSTIVE_THRESHOLD_M_VAL:
+            selected_indices, _ = select_colors_exhaustive(own_colors, target_color, chosen_M_val)
+        else:
+            selected_indices, _ = select_colors_sa_timed(own_colors, target_color, chosen_M_val,
+                                                       SA_PARAMS_MAIN, sa_time_limit_ms_for_this_target)
+        
+        if not selected_indices and K > 0 : # 万が一空ならデフォルト
+            selected_indices = [0] * chosen_M_val
+            # print(f"Warning: selected_indices empty for target {i}, M_val {chosen_M_val}", file=sys.stderr)
+
+
+        for c_idx in selected_indices:
+            print(f"1 0 {col_to_use} {c_idx}")
+            
+        print(f"2 0 {col_to_use}") # 混合して画伯へ
+        remaining_paint_in_col[col_to_use] = chosen_M_val - 1 # 1g使ったので残り
+        
+        current_col_idx = (current_col_idx + 1) % N
+
+    # print(f"Total time: {time.perf_counter() - overall_start_time:.3f}s", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
