@@ -326,14 +326,14 @@ int main() {
     for (int r_h_idx = 0; r_h_idx < N_grid_size - 1; ++r_h_idx) {
         for (int j = 0; j < N_grid_size; ++j) {
              // Keep upper and lower half separate, but allow flow within each half by default
-            std::cout << (j > 0 ? " " : "") << "0";
+            std::cout << (j > 0 ? " " : "") << (r_h_idx == HORIZONTAL_DIVIDER_ROW_INDEX ? "1" : "0");
         }
         std::cout << std::endl;
     }
     
-    const int WELL_CAPACITY = 20; // Each slot (well) uses N_grid_size cells from one row
+    const int WELL_CAPACITY = 10; // Each slot (well) uses N_grid_size cells from one row
     const int NUM_SLOTS_PER_HALF = N_grid_size; // N slots in upper half, N in lower half
-    const int NUM_TOTAL_SLOTS = NUM_SLOTS_PER_HALF;
+    const int NUM_TOTAL_SLOTS = 2 * NUM_SLOTS_PER_HALF;
 
     std::vector<SlotInfo> slots(NUM_TOTAL_SLOTS);
     int current_slot_idx_preference = 0; 
@@ -341,16 +341,15 @@ int main() {
     std::set<int> m_cands_set; 
     int max_m_val_heuristic = 0; 
     for (int m = 1; m <= WELL_CAPACITY; ++m) { // m_val cannot exceed well capacity
-        if ( 1.8*m * 1000 <= T_total_ops_limit) { 
+        if (2LL * m * 1000 <= T_total_ops_limit) { 
             max_m_val_heuristic = m;
         }
     }
-    cerr << "Max m_val heuristic: " << max_m_val_heuristic << std::endl;
     if (max_m_val_heuristic > 0) {
-        for (int m = 1; m <= max_m_val_heuristic; ++m) m_cands_set.insert(m);
-  
+        for (int m = 1; m <= min(max_m_val_heuristic,10); ++m) m_cands_set.insert(m);
+        m_cands_set.insert(std::max(max_m_val_heuristic / 2, 1));
     }
-    
+
     std::vector<int> m_cands(m_cands_set.begin(), m_cands_set.end());
     std::sort(m_cands.begin(), m_cands.end()); // Ensure sorted
     
@@ -379,7 +378,7 @@ int main() {
         if (H_num_targets - i_target > 0) {
             avg_time_per_remaining_target_ms = (remaining_time_budget_s / (H_num_targets - i_target) * 1000.0);
         }
-        double sa_time_limit_ms = std::max(0.01, std::min(avg_time_per_remaining_target_ms*.9, 2.7));
+        double sa_time_limit_ms = std::max(0.01, std::min(avg_time_per_remaining_target_ms, 2.7));
         if (remaining_time_budget_s < 0.05 && i_target < H_num_targets -1 ) sa_time_limit_ms = 0.03;
 
 
@@ -393,7 +392,6 @@ int main() {
         Color batch_mixed_color;
         double batch_score = std::numeric_limits<double>::infinity();
         int batch_m_val_chosen = 0;
-
 
         // --- Strategy 2: Reuse existing paint ---
         int best_reuse_slot_idx = -1;
@@ -448,10 +446,6 @@ int main() {
                 }
             }
         }
-        for(auto & idx : best_1g_indices) {
-            cerr << idx << " ";
-        }
-        cerr << " | best_1g_score: " << best_1g_score << " | best_1g_m_val: " << best_1g_m_val << std::endl;
         
         // --- Decide Strategy ---
         int num_blank_slots = 0;
@@ -463,9 +457,7 @@ int main() {
         bool chose_batch = false;
         bool chose_reuse = false;
         bool chose_new_1g = false;
-
-
-
+        
         if (!chose_batch && reuse_is_possible && reuse_score <= best_1g_score*(1-num_blank_slots / static_cast<double>(NUM_TOTAL_SLOTS))) {
              if (1 <= remaining_ops) { // Ops for use
                 chose_reuse = true;
@@ -479,14 +471,17 @@ int main() {
             }
         }
 
-
-        // --- Execute Chosen Strategy ---
-
         if (chose_reuse && !chose_batch) { // Ensure batch wasn't chosen then failed ops check
-            int actual_row = 0;
+            int actual_row = (best_reuse_slot_idx < NUM_SLOTS_PER_HALF) ? 0 : (HORIZONTAL_DIVIDER_ROW_INDEX + 1);
             int actual_col = best_reuse_slot_idx % NUM_SLOTS_PER_HALF;
             operations_log.push_back("2 " + to_string(actual_row) + " " + to_string(actual_col));
             slots[best_reuse_slot_idx].remaining_grams--;
+            if (slots[best_reuse_slot_idx].is_batch_paint) {
+                slots[best_reuse_slot_idx].batch_targets_remaining--;
+                if (slots[best_reuse_slot_idx].batch_targets_remaining <= 0) {
+                    slots[best_reuse_slot_idx].is_batch_paint = false; // Batch fulfilled
+                }
+            }
             remaining_ops--;
         }
         
@@ -496,14 +491,14 @@ int main() {
             for(int offset = 0; offset < NUM_TOTAL_SLOTS; ++offset) {
                 int temp_slot = (search_start_pref + offset) % NUM_TOTAL_SLOTS;
                  // Prefer non-batch slots or empty slots
-                if(slots[temp_slot].remaining_grams == 0) {
+                if(!slots[temp_slot].is_batch_paint || slots[temp_slot].remaining_grams == 0) {
                     if (slots[temp_slot].remaining_grams == 0) {slot_to_use = temp_slot; break;}
                     if (slot_to_use == -1) slot_to_use = temp_slot; // Keep first non-batch, non-empty
                 }
             }
             if(slot_to_use == -1) slot_to_use = current_slot_idx_preference; // Fallback to overwrite preferred
 
-            int actual_row =0;
+            int actual_row = (slot_to_use < NUM_SLOTS_PER_HALF) ? 0 : (HORIZONTAL_DIVIDER_ROW_INDEX + 1);
             int actual_col = slot_to_use % NUM_SLOTS_PER_HALF;
 
             int discards_needed = slots[slot_to_use].remaining_grams;
@@ -525,7 +520,29 @@ int main() {
             }
         }
 
-  
+        if (!chose_batch && !chose_reuse && !chose_new_1g) { // Fallback if no strategy chosen or ops failed
+            if (reuse_is_possible && 1 <= remaining_ops) { // Fallback to reuse if possible
+                int actual_row = (best_reuse_slot_idx < NUM_SLOTS_PER_HALF) ? 0 : (HORIZONTAL_DIVIDER_ROW_INDEX + 1);
+                int actual_col = best_reuse_slot_idx % NUM_SLOTS_PER_HALF;
+                operations_log.push_back("2 " + to_string(actual_row) + " " + to_string(actual_col));
+                slots[best_reuse_slot_idx].remaining_grams--;
+                 if (slots[best_reuse_slot_idx].is_batch_paint) slots[best_reuse_slot_idx].batch_targets_remaining--;
+                remaining_ops--;
+            } else if (!best_1g_indices.empty() && (1 <= remaining_ops)) { // Fallback to create 1g if its indices determined but ops failed earlier
+                 // This is a bit risky, as we might not have enough ops for paint *and* use
+                 // Simplified: just do a "use" from a default slot
+                int fallback_row = ( (i_target % NUM_TOTAL_SLOTS) < NUM_SLOTS_PER_HALF) ? 0 : (HORIZONTAL_DIVIDER_ROW_INDEX + 1);
+                int fallback_col = (i_target % NUM_TOTAL_SLOTS) % NUM_SLOTS_PER_HALF;
+                operations_log.push_back("2 " + to_string(fallback_row) + " " + to_string(fallback_col));
+                if (remaining_ops > 0) remaining_ops--;
+
+            } else { // Absolute fallback
+                int fallback_row = ( (i_target % NUM_TOTAL_SLOTS) < NUM_SLOTS_PER_HALF) ? 0 : (HORIZONTAL_DIVIDER_ROW_INDEX + 1);
+                int fallback_col = (i_target % NUM_TOTAL_SLOTS) % NUM_SLOTS_PER_HALF;
+                operations_log.push_back("2 " + to_string(fallback_row) + " " + to_string(fallback_col));
+                if (remaining_ops > 0) remaining_ops--;
+            }
+        }
     }
 
     // Output all logged operations
