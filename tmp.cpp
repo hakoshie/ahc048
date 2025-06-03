@@ -326,14 +326,14 @@ int main() {
     for (int r_h_idx = 0; r_h_idx < N_grid_size - 1; ++r_h_idx) {
         for (int j = 0; j < N_grid_size; ++j) {
              // Keep upper and lower half separate, but allow flow within each half by default
-            std::cout << (j > 0 ? " " : "") << "0";
+            std::cout << (j > 0 ? " " : "") << (r_h_idx == HORIZONTAL_DIVIDER_ROW_INDEX ? "1" : "0");
         }
         std::cout << std::endl;
     }
     
-    const int WELL_CAPACITY = 20; // Each slot (well) uses N_grid_size cells from one row
+    const int WELL_CAPACITY = 10; // Each slot (well) uses N_grid_size cells from one row
     const int NUM_SLOTS_PER_HALF = N_grid_size; // N slots in upper half, N in lower half
-    const int NUM_TOTAL_SLOTS = NUM_SLOTS_PER_HALF;
+    const int NUM_TOTAL_SLOTS = 2 * NUM_SLOTS_PER_HALF;
 
     std::vector<SlotInfo> slots(NUM_TOTAL_SLOTS);
     int current_slot_idx_preference = 0; 
@@ -341,16 +341,17 @@ int main() {
     std::set<int> m_cands_set; 
     int max_m_val_heuristic = 0; 
     for (int m = 1; m <= WELL_CAPACITY; ++m) { // m_val cannot exceed well capacity
-        if ( 1.8*m * 1000 <= T_total_ops_limit) { 
+        if (2LL * m * 1000 <= T_total_ops_limit) { 
             max_m_val_heuristic = m;
         }
     }
-    cerr << "Max m_val heuristic: " << max_m_val_heuristic << std::endl;
     if (max_m_val_heuristic > 0) {
         for (int m = 1; m <= max_m_val_heuristic; ++m) m_cands_set.insert(m);
-  
+        m_cands_set.insert(std::max(max_m_val_heuristic / 2, 1));
     }
-    
+    if (m_cands_set.empty() && K_num_colors > 0) {
+        if (1 <= T_total_ops_limit) m_cands_set.insert(1);
+    }
     std::vector<int> m_cands(m_cands_set.begin(), m_cands_set.end());
     std::sort(m_cands.begin(), m_cands.end()); // Ensure sorted
     
@@ -394,6 +395,73 @@ int main() {
         double batch_score = std::numeric_limits<double>::infinity();
         int batch_m_val_chosen = 0;
 
+        if (i_target + BATCH_MIN_SIZE -1 < H_num_targets && K_num_colors > 0) { // Enough targets left for a minimal batch and colors exist
+            std::vector<const Color*> targets_for_batch;
+            targets_for_batch.push_back(&targets[i_target]);
+            Color temp_avg_color = targets[i_target];
+
+            for (int k = 1; k < BATCH_MAX_LOOK_AHEAD && (i_target + k) < H_num_targets; ++k) {
+                if (calculate_error_sq(targets[i_target+k], targets[i_target]) < BATCH_SIMILARITY_THRESHOLD_SQ) {
+                    targets_for_batch.push_back(&targets[i_target+k]);
+                    temp_avg_color = temp_avg_color + targets[i_target+k];
+                } else {
+                    break;
+                }
+            }
+
+        //     if (targets_for_batch.size() >= BATCH_MIN_SIZE) {
+        //         batch_num_targets_covered = targets_for_batch.size();
+        //         batch_avg_target_color = temp_avg_color / batch_num_targets_covered;
+
+        //         // Find best m_val for this batch_avg_target_color, ensuring m_val >= batch_num_targets_covered
+        //         double current_best_batch_creation_score = std::numeric_limits<double>::infinity();
+                
+        //         for (int m_trial : m_cands) {
+        //             if (m_trial == 0 || m_trial < batch_num_targets_covered || m_trial > WELL_CAPACITY) continue;
+                    
+        //             std::vector<int> temp_indices;
+        //             double temp_err_sqrt;
+        //             Color temp_mixed_c;
+        //             // For batch, always use SA for now, or a faster method if time is critical
+        //             SAParams sa_p_batch = {5, 1e-3, 0.98, 5, 5}; // Faster SA for batch eval
+        //             std::tie(temp_indices, temp_err_sqrt, temp_mixed_c) = 
+        //                 select_colors_sa_timed(own_colors, batch_avg_target_color, m_trial, sa_p_batch, sa_time_limit_ms/2.0); // Use part of time budget
+
+        //             if (temp_indices.empty() && m_trial > 0 && !own_colors.empty()) { // Fallback
+        //                 temp_indices.assign(m_trial, 0);
+        //                 temp_mixed_c = get_mixed_color(temp_indices, own_colors, m_trial);
+        //                 temp_err_sqrt = calculate_error_sqrt(temp_mixed_c, batch_avg_target_color);
+        //             } else if (temp_indices.empty()) continue;
+
+
+        //             double total_err_for_batch_sq = 0;
+        //             for(const Color* target_ptr : targets_for_batch){
+        //                 total_err_for_batch_sq += calculate_error_sq(temp_mixed_c, *target_ptr);
+        //             }
+        //             double avg_err_sqrt_for_batch = std::sqrt(total_err_for_batch_sq / batch_num_targets_covered);
+                    
+        //             // Score for creating m_trial paint, using it for batch_num_targets_covered times
+        //             double cost_paint_tubes =discount_factor* D_cost_factor * m_trial;
+        //             // Benefit is using it batch_num_targets_covered times
+        //             // Effective cost per target for paint: D_cost_factor * m_trial / batch_num_targets_covered
+        //             // Or, cost_waste = D_cost_factor * (m_trial - batch_num_targets_covered)
+        //             // Score = avg_err_sqrt * 10000 + D_cost_factor * (m_trial - batch_num_targets_covered) / batch_num_targets_covered; // Heuristic
+        //             double this_batch_candidate_score = avg_err_sqrt_for_batch * 10000.0 +discount_factor* D_cost_factor * (m_trial - batch_num_targets_covered);
+
+
+        //             if (this_batch_candidate_score < current_best_batch_creation_score) {
+        //                 current_best_batch_creation_score = this_batch_candidate_score;
+        //                 batch_m_indices = temp_indices;
+        //                 batch_mixed_color = temp_mixed_c;
+        //                 batch_score = this_batch_candidate_score; // Store the overall score for this batch option
+        //                 batch_m_val_chosen = m_trial;
+        //             }
+        //         }
+        //         if (!batch_m_indices.empty()) {
+        //             do_batch_creation = true; // Found a viable batch creation
+        //         }
+        //     }
+        }
 
         // --- Strategy 2: Reuse existing paint ---
         int best_reuse_slot_idx = -1;
@@ -424,8 +492,8 @@ int main() {
                 double current_m_err_sqrt;
                 Color current_m_mixed_c;
 
-                SAParams sa_p = {10, 1e-3, 0.97, 10, 10}; // Default SA
-                if (m_trial <=3 && K_num_colors <= 8) { // Small m, small K, use exhaustive
+                SAParams sa_p = {10, 1e-4, 0.97, 10, 10}; // Default SA
+                if (m_trial<=5 or (m_trial<=6 and K_num_colors<=8)) { // Small m, small K, use exhaustive
                      std::tie(current_m_indices, current_m_err_sqrt, current_m_mixed_c) = 
                         select_colors_exhaustive(own_colors, current_target_color_obj, m_trial);
                 } else {
@@ -440,6 +508,7 @@ int main() {
                 } else if (current_m_indices.empty()) continue;
 
                 double score_candidate = current_m_err_sqrt * 10000.0 + discount_factor*D_cost_factor * (m_trial - 1);
+
                 if (score_candidate < best_1g_score) {
                     best_1g_score = score_candidate;
                     best_1g_indices = current_m_indices;
@@ -448,25 +517,37 @@ int main() {
                 }
             }
         }
-        for(auto & idx : best_1g_indices) {
-            cerr << idx << " ";
-        }
-        cerr << " | best_1g_score: " << best_1g_score << " | best_1g_m_val: " << best_1g_m_val << std::endl;
         
         // --- Decide Strategy ---
-        int num_blank_slots = 0;
-        for (int slot_idx = 0; slot_idx < NUM_TOTAL_SLOTS; ++slot_idx) {
-            if (slots[slot_idx].remaining_grams == 0) {
-                num_blank_slots++;
-            }
-        }
         bool chose_batch = false;
         bool chose_reuse = false;
         bool chose_new_1g = false;
 
+        // Normalize batch_score to be comparable (score for the first target of the batch)
+        double batch_first_target_err_sqrt = std::numeric_limits<double>::infinity();
+        if(do_batch_creation){
+            batch_first_target_err_sqrt = calculate_error_sqrt(batch_mixed_color, targets[i_target]);
+        }
+        // Simplified comparison:
+        // Consider cost of paint tubes for the *first* use.
+        // Batch: D_cost_factor * (batch_m_val_chosen - 1)  (if we assume 1 use, then rest is bonus)
+        // 1G: D_cost_factor * (best_1g_m_val - 1)
+        double batch_comparable_score = do_batch_creation ? (batch_first_target_err_sqrt * 10000.0 + D_cost_factor * (batch_m_val_chosen -1) ) 
+                                                         : std::numeric_limits<double>::infinity();
 
 
-        if (!chose_batch && reuse_is_possible && reuse_score <= best_1g_score*(1-num_blank_slots / static_cast<double>(NUM_TOTAL_SLOTS))) {
+        if (do_batch_creation && batch_comparable_score <= reuse_score && batch_comparable_score <= best_1g_score) {
+            // More sophisticated check: is the *total benefit* of batching worth it?
+            // Total error for batch targets vs total error for individual creation, considering paint costs.
+            // For now, use the simplified score for the first target.
+            // And ensure enough ops for the full batch creation.
+            int ops_for_batch = batch_m_val_chosen + 1; // paints + 1 use (discards handled separately)
+            if (ops_for_batch <= remaining_ops) {
+                 chose_batch = true;
+            }
+        }
+        
+        if (!chose_batch && reuse_is_possible && reuse_score <= best_1g_score) {
              if (1 <= remaining_ops) { // Ops for use
                 chose_reuse = true;
              }
@@ -481,12 +562,53 @@ int main() {
 
 
         // --- Execute Chosen Strategy ---
+        if (chose_batch) {
+            int slot_to_use = -1;
+            // Find/clear slot
+            int search_start_pref = current_slot_idx_preference;
+            for(int offset = 0; offset < NUM_TOTAL_SLOTS; ++offset) {
+                int temp_slot = (search_start_pref + offset) % NUM_TOTAL_SLOTS;
+                if(slots[temp_slot].remaining_grams == 0) { slot_to_use = temp_slot; break; }
+            }
+            if(slot_to_use == -1) slot_to_use = current_slot_idx_preference;
 
+            int actual_row = (slot_to_use < NUM_SLOTS_PER_HALF) ? 0 : (HORIZONTAL_DIVIDER_ROW_INDEX + 1);
+            int actual_col = slot_to_use % NUM_SLOTS_PER_HALF;
+
+            int discards_needed = slots[slot_to_use].remaining_grams;
+            if (discards_needed + batch_m_val_chosen + 1 > remaining_ops) { // Re-check with discards
+                chose_batch = false; // Cannot do it, try other options
+                 if (reuse_is_possible && reuse_score <= best_1g_score && 1 <= remaining_ops) chose_reuse = true;
+                 else if (!best_1g_indices.empty() && (best_1g_m_val + 1 <= remaining_ops)) chose_new_1g = true;
+                 else chose_new_1g = false; // Reset if it was true but now ops are too low
+            } else {
+                for(int d=0; d<discards_needed; ++d) operations_log.push_back("3 " + to_string(actual_row) + " " + to_string(actual_col));
+                remaining_ops -= discards_needed;
+                
+                for(int c_idx : batch_m_indices) operations_log.push_back("1 " + to_string(actual_row) + " " + to_string(actual_col) + " " + to_string(c_idx));
+                operations_log.push_back("2 " + to_string(actual_row) + " " + to_string(actual_col));
+                
+                slots[slot_to_use].color = batch_mixed_color;
+                slots[slot_to_use].remaining_grams = batch_m_val_chosen - 1;
+                slots[slot_to_use].is_batch_paint = true;
+                slots[slot_to_use].batch_targets_remaining = batch_num_targets_covered - 1;
+                current_slot_idx_preference = (slot_to_use + 1) % NUM_TOTAL_SLOTS;
+                remaining_ops -= (batch_m_val_chosen + 1);
+                i_target += (batch_num_targets_covered - 1); // Advance i_target
+            }
+        }
+        
         if (chose_reuse && !chose_batch) { // Ensure batch wasn't chosen then failed ops check
-            int actual_row = 0;
+            int actual_row = (best_reuse_slot_idx < NUM_SLOTS_PER_HALF) ? 0 : (HORIZONTAL_DIVIDER_ROW_INDEX + 1);
             int actual_col = best_reuse_slot_idx % NUM_SLOTS_PER_HALF;
             operations_log.push_back("2 " + to_string(actual_row) + " " + to_string(actual_col));
             slots[best_reuse_slot_idx].remaining_grams--;
+            if (slots[best_reuse_slot_idx].is_batch_paint) {
+                slots[best_reuse_slot_idx].batch_targets_remaining--;
+                if (slots[best_reuse_slot_idx].batch_targets_remaining <= 0) {
+                    slots[best_reuse_slot_idx].is_batch_paint = false; // Batch fulfilled
+                }
+            }
             remaining_ops--;
         }
         
@@ -496,14 +618,14 @@ int main() {
             for(int offset = 0; offset < NUM_TOTAL_SLOTS; ++offset) {
                 int temp_slot = (search_start_pref + offset) % NUM_TOTAL_SLOTS;
                  // Prefer non-batch slots or empty slots
-                if(slots[temp_slot].remaining_grams == 0) {
+                if(!slots[temp_slot].is_batch_paint || slots[temp_slot].remaining_grams == 0) {
                     if (slots[temp_slot].remaining_grams == 0) {slot_to_use = temp_slot; break;}
                     if (slot_to_use == -1) slot_to_use = temp_slot; // Keep first non-batch, non-empty
                 }
             }
             if(slot_to_use == -1) slot_to_use = current_slot_idx_preference; // Fallback to overwrite preferred
 
-            int actual_row =0;
+            int actual_row = (slot_to_use < NUM_SLOTS_PER_HALF) ? 0 : (HORIZONTAL_DIVIDER_ROW_INDEX + 1);
             int actual_col = slot_to_use % NUM_SLOTS_PER_HALF;
 
             int discards_needed = slots[slot_to_use].remaining_grams;
@@ -525,7 +647,29 @@ int main() {
             }
         }
 
-  
+        if (!chose_batch && !chose_reuse && !chose_new_1g) { // Fallback if no strategy chosen or ops failed
+            if (reuse_is_possible && 1 <= remaining_ops) { // Fallback to reuse if possible
+                int actual_row = (best_reuse_slot_idx < NUM_SLOTS_PER_HALF) ? 0 : (HORIZONTAL_DIVIDER_ROW_INDEX + 1);
+                int actual_col = best_reuse_slot_idx % NUM_SLOTS_PER_HALF;
+                operations_log.push_back("2 " + to_string(actual_row) + " " + to_string(actual_col));
+                slots[best_reuse_slot_idx].remaining_grams--;
+                 if (slots[best_reuse_slot_idx].is_batch_paint) slots[best_reuse_slot_idx].batch_targets_remaining--;
+                remaining_ops--;
+            } else if (!best_1g_indices.empty() && (1 <= remaining_ops)) { // Fallback to create 1g if its indices determined but ops failed earlier
+                 // This is a bit risky, as we might not have enough ops for paint *and* use
+                 // Simplified: just do a "use" from a default slot
+                int fallback_row = ( (i_target % NUM_TOTAL_SLOTS) < NUM_SLOTS_PER_HALF) ? 0 : (HORIZONTAL_DIVIDER_ROW_INDEX + 1);
+                int fallback_col = (i_target % NUM_TOTAL_SLOTS) % NUM_SLOTS_PER_HALF;
+                operations_log.push_back("2 " + to_string(fallback_row) + " " + to_string(fallback_col));
+                if (remaining_ops > 0) remaining_ops--;
+
+            } else { // Absolute fallback
+                int fallback_row = ( (i_target % NUM_TOTAL_SLOTS) < NUM_SLOTS_PER_HALF) ? 0 : (HORIZONTAL_DIVIDER_ROW_INDEX + 1);
+                int fallback_col = (i_target % NUM_TOTAL_SLOTS) % NUM_SLOTS_PER_HALF;
+                operations_log.push_back("2 " + to_string(fallback_row) + " " + to_string(fallback_col));
+                if (remaining_ops > 0) remaining_ops--;
+            }
+        }
     }
 
     // Output all logged operations
