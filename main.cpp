@@ -86,232 +86,9 @@ double calculate_error_sqrt(const Color& mixed_color, const Color& target_color)
     return std::sqrt(calculate_error_sq(mixed_color, target_color));
 }
 
-// --- Linear Algebra Utilities (Minimal for QP-like approach) ---
-namespace LinAlg {
-    using Matrix = std::vector<std::vector<double>>;
-    using Vector = std::vector<double>;
-
-    // Solves Ax = b using Gaussian elimination with partial pivoting.
-    // Returns empty vector if matrix is singular or system is inconsistent.
-    // Modifies A and b.
-    Vector solve_linear_system(Matrix A_orig, Vector b_orig) { // Pass by value to modify copies
-        Matrix A = A_orig;
-        Vector b = b_orig;
-        int n = A.size();
-        if (n == 0 || A[0].size() != static_cast<size_t>(n) || b.size() != static_cast<size_t>(n)) {
-            return {}; // Invalid input
-        }
-
-        for (int i = 0; i < n; ++i) {
-            int pivot_row = i;
-            for (int k = i + 1; k < n; ++k) {
-                if (std::abs(A[k][i]) > std::abs(A[pivot_row][i])) {
-                    pivot_row = k;
-                }
-            }
-            if (pivot_row != i) {
-                std::swap(A[i], A[pivot_row]);
-                std::swap(b[i], b[pivot_row]);
-            }
-
-            if (std::abs(A[i][i]) < 1e-12) { 
-                return {}; // Singular or nearly singular
-            }
-
-            double pivot_val = A[i][i];
-            for (int j = i; j < n; ++j) {
-                A[i][j] /= pivot_val;
-            }
-            b[i] /= pivot_val;
-
-            for (int k = 0; k < n; ++k) {
-                if (k != i) {
-                    double factor = A[k][i];
-                    for (int j = i; j < n; ++j) {
-                        A[k][j] -= factor * A[i][j];
-                    }
-                    b[k] -= factor * b[i];
-                }
-            }
-        }
-        return b; 
-    }
-} // namespace LinAlg
 
 
-// --- QP-like approach + Discretization ---
-std::vector<double> calculate_continuous_weights(
-    const std::vector<Color>& tube_colors,
-    const Color& target_color) {
-    
-    int K = tube_colors.size();
-    if (K == 0) return {};
-    if (K == 1) return {1.0};
 
-    LinAlg::Matrix A_system(K + 1, std::vector<double>(K + 1, 0.0));
-    LinAlg::Vector B_rhs(K + 1, 0.0);
-
-    for (int i = 0; i < K; ++i) {
-        for (int j = 0; j < K; ++j) {
-            A_system[i][j] = 2.0 * tube_colors[i].dot(tube_colors[j]);
-        }
-    }
-
-    for (int i = 0; i < K; ++i) {
-        A_system[i][K] = 1.0;
-        A_system[K][i] = 1.0;
-    }
-    A_system[K][K] = 0.0; 
-
-    for (int i = 0; i < K; ++i) {
-        B_rhs[i] = 2.0 * tube_colors[i].dot(target_color);
-    }
-    B_rhs[K] = 1.0; 
-
-    LinAlg::Vector solution_w_lambda = LinAlg::solve_linear_system(A_system, B_rhs);
-
-    std::vector<double> weights(K);
-    if (solution_w_lambda.empty() || solution_w_lambda.size() != static_cast<size_t>(K+1)) { 
-        for (int i = 0; i < K; ++i) weights[i] = 1.0 / K;
-        return weights;
-    }
-
-    double sum_non_negative_w = 0.0;
-    for (int i = 0; i < K; ++i) {
-        weights[i] = std::max(0.0, solution_w_lambda[i]); 
-        sum_non_negative_w += weights[i];
-    }
-
-    if (sum_non_negative_w < 1e-9) { 
-        for (int i = 0; i < K; ++i) weights[i] = 1.0 / K; 
-    } else {
-        for (int i = 0; i < K; ++i) {
-            weights[i] /= sum_non_negative_w; 
-        }
-    }
-    return weights;
-}
-
-std::vector<int> discretize_weights(
-    const std::vector<double>& normalized_weights,
-    int Q_total_quantity) {
-    
-    int K = normalized_weights.size();
-    if (K == 0) return {};
-    if (Q_total_quantity == 0) return std::vector<int>(K, 0);
-
-    std::vector<double> x_float(K);
-    for (int i = 0; i < K; ++i) {
-        x_float[i] = normalized_weights[i] * Q_total_quantity;
-    }
-
-    std::vector<int> x_int(K);
-    int current_sum_int = 0;
-    for (int i = 0; i < K; ++i) {
-        x_int[i] = static_cast<int>(std::round(x_float[i]));
-        current_sum_int += x_int[i];
-    }
-
-    int diff = Q_total_quantity - current_sum_int;
-    
-    std::vector<std::pair<double, int>> adjustment_candidates; 
-    for(int i=0; i<K; ++i) {
-        // For diff > 0 (need to add): priority is how much was rounded down (x_float - x_int)
-        // For diff < 0 (need to subtract): priority is how much was rounded up (x_int - x_float)
-        double priority_metric = (diff > 0) ? (x_float[i] - x_int[i]) : (x_int[i] - x_float[i]);
-        adjustment_candidates.push_back({priority_metric, i});
-    }
-    // Sort descending by priority metric.
-    // If diff > 0, we want to increment those with largest (x_float - x_int).
-    // If diff < 0, we want to decrement those with largest (x_int - x_float).
-    std::sort(adjustment_candidates.rbegin(), adjustment_candidates.rend()); 
-    
-    if (diff > 0) {
-        for (int k = 0; k < diff; ++k) {
-            if (adjustment_candidates.empty()) break;
-            int candidate_idx_in_adj_list = k % adjustment_candidates.size(); // Cycle if diff is large
-            x_int[adjustment_candidates[candidate_idx_in_adj_list].second]++;
-        }
-    } else if (diff < 0) {
-        for (int k = 0; k < -diff; ++k) {
-            if (adjustment_candidates.empty()) break;
-            int candidate_idx_in_adj_list = k % adjustment_candidates.size();
-            int original_tube_idx = adjustment_candidates[candidate_idx_in_adj_list].second;
-            if (x_int[original_tube_idx] > 0) {
-                x_int[original_tube_idx]--;
-            } else { // Cannot decrement this one, try next best from sorted list
-                bool decremented = false;
-                for(size_t offset = 1; offset < adjustment_candidates.size(); ++offset) {
-                    int next_candidate_idx_in_adj_list = (candidate_idx_in_adj_list + offset) % adjustment_candidates.size();
-                    int next_original_tube_idx = adjustment_candidates[next_candidate_idx_in_adj_list].second;
-                    if (x_int[next_original_tube_idx] > 0) {
-                         x_int[next_original_tube_idx]--;
-                         decremented = true;
-                         break;
-                    }
-                }
-                // If still not decremented, it means all remaining candidates are 0, which is unusual but possible.
-            }
-        }
-    }
-    return x_int;
-}
-
-// Returns: {indices_to_mix, error_sqrt, mixed_color, discrete_quantities_per_tube}
-std::tuple<std::vector<int>, double, Color, std::vector<int>> select_colors_qp_approx(
-    const std::vector<Color>& own_colors_list,
-    const Color& target_color_vec,
-    int m_val) { 
-
-    if (own_colors_list.empty() || m_val == 0) {
-        Color default_mixed_color = {0.0, 0.0, 0.0};
-        double err_sqrt = calculate_error_sqrt(default_mixed_color, target_color_vec);
-        return {{}, err_sqrt, default_mixed_color, {}};
-    }
-
-    std::vector<double> continuous_weights = calculate_continuous_weights(own_colors_list, target_color_vec);
-    if (continuous_weights.empty()) { 
-        Color default_mixed_color = {0.0, 0.0, 0.0};
-        double err_sqrt = calculate_error_sqrt(default_mixed_color, target_color_vec);
-        return {{}, err_sqrt, default_mixed_color, std::vector<int>(own_colors_list.size(), 0)};
-    }
-    
-    std::vector<int> discrete_quantities = discretize_weights(continuous_weights, m_val);
-
-    std::vector<int> indices_to_mix_result;
-    indices_to_mix_result.reserve(m_val);
-    int current_total_discrete_quantity = 0;
-    for (size_t i = 0; i < discrete_quantities.size(); ++i) {
-        for (int count = 0; count < discrete_quantities[i]; ++count) {
-            indices_to_mix_result.push_back(i);
-        }
-        current_total_discrete_quantity += discrete_quantities[i];
-    }
-    
-    // Ensure total size is m_val due to potential rounding/adjustment issues
-    // This primarily handles cases where sum(discrete_quantities) != m_val, which discretize_weights tries to prevent.
-    if (current_total_discrete_quantity != m_val) {
-        // Re-discretize or more robustly adjust if this happens frequently
-        // For now, simple fill/truncate:
-        while (indices_to_mix_result.size() < static_cast<size_t>(m_val) && !own_colors_list.empty()) {
-            // Add based on original continuous weights if possible, or just default.
-            int best_idx_to_add = 0;
-            if (!continuous_weights.empty()) {
-                best_idx_to_add = std::distance(continuous_weights.begin(), std::max_element(continuous_weights.begin(), continuous_weights.end()));
-            }
-            indices_to_mix_result.push_back(best_idx_to_add); 
-        }
-        if (indices_to_mix_result.size() > static_cast<size_t>(m_val)) {
-            indices_to_mix_result.resize(m_val); 
-        }
-    }
-
-
-    Color mixed_color_result = get_mixed_color_from_indices(indices_to_mix_result, own_colors_list, m_val);
-    double error_sqrt_result = calculate_error_sqrt(mixed_color_result, target_color_vec);
-
-    return {indices_to_mix_result, error_sqrt_result, mixed_color_result, discrete_quantities};
-}
 
 
 void combinations_with_replacement_recursive(
@@ -587,43 +364,47 @@ int main() {
     for (int i = 0; i < H_num_targets; ++i) {
         std::cin >> targets[i].r >> targets[i].g >> targets[i].b;
     }
-        
+    
+    // ===== START: Palette Layout Configuration =====
+    // 縦仕切り v[i][j]: 全て閉じる
     for (int i = 0; i < N_grid_size; ++i) {
         for (int j = 0; j < N_grid_size - 1; ++j) {
             std::cout << (j > 0 ? " " : "") << "1"; 
         }
         std::cout << std::endl;
     }
-    const int HORIZONTAL_DIVIDER_ROW_INDEX = N_grid_size / 2 -1; 
+
+    const int WELL_HEIGHT = 5; // 各ウェルの高さを5マスに設定
+    // 横仕切り h[i][j]: 5マスごとに区切る
     for (int r_h_idx = 0; r_h_idx < N_grid_size - 1; ++r_h_idx) {
+        // r_h_idx = 4, 9, 14 ... の時に仕切りを閉じる (1)
+        bool close_divider = ((r_h_idx + 1) % WELL_HEIGHT == 0);
         for (int j = 0; j < N_grid_size; ++j) {
-            std::cout << (j > 0 ? " " : "") << (r_h_idx == HORIZONTAL_DIVIDER_ROW_INDEX ? "1" : "0");
+            std::cout << (j > 0 ? " " : "") << (close_divider ? "1" : "0");
         }
         std::cout << std::endl;
     }
     
-    const int WELL_CAPACITY = N_grid_size; // Assuming each of the N_grid_size cells in a row can hold 1g, and a slot uses one full row.
-                                        // If a slot is one cell, WELL_CAPACITY = 1.
-                                        // The problem says "kマスからなるウェルには最大kグラム".
-                                        // My interpretation: one slot = one row (N cells) = capacity N.
-                                        // If N=20, capacity is 20. The previous hardcoded 10 was likely based on a different assumption.
-                                        // The problem also stated "N=20固定" implying well capacity might be related.
-                                        // Sticking to previous value 10 based on "Q=10 or smaller" discussions.
-    const int ACTUAL_WELL_CAPACITY = 10; 
+    const int ACTUAL_WELL_CAPACITY = WELL_HEIGHT; 
+    const int NUM_SLOTS_PER_REGION = N_grid_size;
+    const int NUM_REGIONS = N_grid_size / ACTUAL_WELL_CAPACITY;
+    const int NUM_TOTAL_SLOTS = NUM_REGIONS * NUM_SLOTS_PER_REGION; // 4 * 20 = 80 slots
 
-    const int NUM_SLOTS_PER_HALF = N_grid_size; 
-    const int NUM_TOTAL_SLOTS = 2 * NUM_SLOTS_PER_HALF;
-
+    // ヘルパー関数: スロットインデックスからパレットの座標を取得
+    auto get_coords_from_slot_idx = [&](int slot_idx) {
+        int region_index = slot_idx / NUM_SLOTS_PER_REGION; // 0, 1, 2, 3
+        int col_in_region = slot_idx % NUM_SLOTS_PER_REGION; // 0-19
+        int start_row = region_index * ACTUAL_WELL_CAPACITY;
+        return make_pair(start_row, col_in_region);
+    };
+    // ===== END: Palette Layout Configuration =====
+    
     std::vector<SlotInfo> slots(NUM_TOTAL_SLOTS);
     int current_slot_idx_preference = 0; 
     std::set<int> m_cands_set; 
     for (int m = 1; m <= ACTUAL_WELL_CAPACITY; ++m) {
         if(2*m*1000<=T_total_ops_limit) m_cands_set.insert(m);
     }
-    // Add some common/middle values if not already present
-    // if (ACTUAL_WELL_CAPACITY >= 4) m_cands_set.insert(std::max(1, ACTUAL_WELL_CAPACITY / 2));
-    // if (ACTUAL_WELL_CAPACITY >= 6) m_cands_set.insert(std::max(1, ACTUAL_WELL_CAPACITY / 3 * 2));
-
 
     std::vector<int> m_cands(m_cands_set.begin(), m_cands_set.end());
     std::sort(m_cands.begin(), m_cands.end());
@@ -631,13 +412,13 @@ int main() {
     const double TOTAL_TIME_BUDGET_S = (K_num_colors > 40 && H_num_targets > 800 && N_grid_size > 15) ? 2.85 : 2.95;
     int remaining_ops = T_total_ops_limit;
     std::vector<std::string> operations_log; 
-    int num_blank_slots = 40;
+    int num_blank_slots = NUM_TOTAL_SLOTS;
 
     for (int i_target = 0; i_target < H_num_targets; ++i_target) {
         if (remaining_ops <= 0 && i_target < H_num_targets) { 
-            int fallback_row = ( ( (current_slot_idx_preference + i_target) % NUM_TOTAL_SLOTS) < NUM_SLOTS_PER_HALF) ? 0 : (HORIZONTAL_DIVIDER_ROW_INDEX + 1);
-            int fallback_col = ( (current_slot_idx_preference + i_target) % NUM_TOTAL_SLOTS) % NUM_SLOTS_PER_HALF;
-            operations_log.push_back("2 " + to_string(fallback_row) + " " + to_string(fallback_col));
+            int fallback_slot_idx = (current_slot_idx_preference + i_target) % NUM_TOTAL_SLOTS;
+            auto coords = get_coords_from_slot_idx(fallback_slot_idx);
+            operations_log.push_back("2 " + to_string(coords.first) + " " + to_string(coords.second));
             continue;
         }
     
@@ -660,10 +441,9 @@ int main() {
         double min_error_sqrt = std::numeric_limits<double>::infinity();
        
         vector<pair<double,int>> mix_color_candidates; // For debugging or future use
-
         Color mixed_target_color_obj;
-        int mix_num=min(max(min((int)D_cost_factor/300,5),1), H_num_targets - i_target);
-        FOR(j,i_target,min(H_num_targets,i_target +100*mix_num)){
+        int mix_num=min(max(min((int)D_cost_factor/180,5),1), H_num_targets - i_target);//300?
+        FOR(j,i_target,min(H_num_targets,i_target +180*mix_num)){// 200? 100
             auto error_sqrt_j= calculate_error_sqrt(current_target_color_obj, targets[j]);
             mix_color_candidates.push_back({error_sqrt_j, j});
         }
@@ -686,7 +466,6 @@ int main() {
             }
         }
         bool reuse_is_possible = (best_reuse_slot_idx != -1);
-        // Score for reuse: only error cost, no paint cost. Ops cost is 1 (for "use")
         double reuse_score = reuse_is_possible ? (min_reuse_error_sqrt * 10000.0) : std::numeric_limits<double>::infinity();
 
         double best_1g_score = std::numeric_limits<double>::infinity();
@@ -697,17 +476,16 @@ int main() {
 
         if (K_num_colors > 0) {
             set<int> m_cands;
-            rep(mi,11){
+            rep(mi,ACTUAL_WELL_CAPACITY + 1){ // mの候補はウェル容量まで
                 if(2*mi*(1000-i_target) <=remaining_ops) {
                     m_cands.insert(mi);
                 }
             }
             if(num_blank_slots > 0) {
-                rep(mi,11){
+                rep(mi,ACTUAL_WELL_CAPACITY + 1){
                     m_cands.insert(mi);
                 }
             }
-            // m_cands.erase(std::unique(m_cands.begin(), m_cands.end()), m_cands.end());
             for (int m_trial : m_cands) {
                 if (m_trial == 0 || m_trial > ACTUAL_WELL_CAPACITY) continue;
                 if (m_trial + 1 > remaining_ops) continue; 
@@ -717,24 +495,21 @@ int main() {
                 Color current_m_mixed_c_candidate;
                 bool candidate_found = false;
 
-                // Try QP Approx first as it's deterministic and potentially fast
-                auto qp_res_tuple = select_colors_qp_approx(own_colors, mixed_target_color_obj, m_trial);
-                if (!get<0>(qp_res_tuple).empty() || m_trial == 0) { // Check if QP returned a valid (possibly empty for m_trial=0) set of indices
-                    current_m_indices_candidate = get<0>(qp_res_tuple);
-                    current_m_err_sqrt_candidate = get<1>(qp_res_tuple);
-                    current_m_mixed_c_candidate = get<2>(qp_res_tuple);
-                    candidate_found = true;
-                }
+                // auto qp_res_tuple = select_colors_qp_approx(own_colors, mixed_target_color_obj, m_trial);
+                // if (!get<0>(qp_res_tuple).empty() || m_trial == 0) {
+                //     current_m_indices_candidate = get<0>(qp_res_tuple);
+                //     current_m_err_sqrt_candidate = get<1>(qp_res_tuple);
+                //     current_m_mixed_c_candidate = get<2>(qp_res_tuple);
+                //     candidate_found = true;
+                // }
 
-                // Try Exhaustive if applicable and QP wasn't good enough or failed
-                // Heuristic for complexity: K^m_trial approx. For C(K+m-1, m).
                 long long combinations_approx = 1;
                 if (K_num_colors > 0 && m_trial > 0) {
                     for(int i=0; i<m_trial; ++i) {
                         if (__builtin_mul_overflow(combinations_approx, (K_num_colors+m_trial-1-i), &combinations_approx)) {combinations_approx = -1; break;}
-                        if (combinations_approx < 0) break; // Overflow
+                        if (combinations_approx < 0) break; 
                         combinations_approx /= (i+1);
-                         if (combinations_approx < 0 || combinations_approx > 30000) {combinations_approx = -1; break;} // Cap
+                         if (combinations_approx < 0 || combinations_approx > 30000) {combinations_approx = -1; break;}
                     }
                 } else if (m_trial == 0) combinations_approx = 1;
 
@@ -749,14 +524,12 @@ int main() {
                     }
                 }
                 
-                // Try SA, possibly seeded with QP/Exhaustive result, if still not good or not run
-                // SA should run if others weren't good enough or to refine.
                 SAParams sa_p = {1.0, 1e-4, 0.97, std::max(10, K_num_colors / (m_trial+1) + 5), std::max(20, K_num_colors*2/(m_trial+1) + 10)};
                 std::vector<int> sa_initial_seed = candidate_found ? current_m_indices_candidate : std::vector<int>();
                 
                 auto sa_res = select_colors_sa_timed(own_colors, mixed_target_color_obj, m_trial, sa_p, method_time_limit_ms, sa_initial_seed);
                 if (!candidate_found || get<1>(sa_res) < current_m_err_sqrt_candidate) {
-                     if (!get<0>(sa_res).empty() || m_trial == 0) { // Ensure SA returned something valid
+                     if (!get<0>(sa_res).empty() || m_trial == 0) { 
                         current_m_indices_candidate = get<0>(sa_res);
                         current_m_err_sqrt_candidate = get<1>(sa_res);
                         current_m_mixed_c_candidate = get<2>(sa_res);
@@ -764,39 +537,27 @@ int main() {
                      }
                 }
                 
-                if (!candidate_found && m_trial > 0 && !own_colors.empty()) { // Absolute fallback for this m_trial
+                if (!candidate_found && m_trial > 0 && !own_colors.empty()) {
                     current_m_indices_candidate.assign(m_trial, 0);
                     current_m_mixed_c_candidate = get_mixed_color_from_indices(current_m_indices_candidate, own_colors, m_trial);
                     current_m_err_sqrt_candidate = calculate_error_sqrt(current_m_mixed_c_candidate, current_target_color_obj);
                     candidate_found = true;
                 } else if (!candidate_found) {
-                    continue; // No valid mix found for this m_trial
+                    continue; 
                 }
 
-                // Score for new paint: error cost + D_cost_factor * (tubes_used - 1 if some is leftover)
-                // The problem formula is D * (total_used_from_tubes - H_num_targets)
-                // Here, for one target, effective cost is D * (m_trial). If we make m_trial grams and use 1, m_trial-1 is wasted.
-                // The provided formula `D_cost_factor * (m_trial -1)` was for when 1g is used.
-                // If we consider the full game score, each tube pull costs D.
-                // So, for m_trial tube pulls, cost is D_cost_factor * m_trial.
                 double score_candidate = current_m_err_sqrt_candidate * 10000.0 + discount_factor * D_cost_factor * (m_trial-1); 
                 if (score_candidate < best_1g_score) {
                     best_1g_score = score_candidate;
                     best_1g_indices = current_m_indices_candidate;
                     best_1g_mixed_color = current_m_mixed_c_candidate;
                     best_1g_error_sqrt = current_m_err_sqrt_candidate;
-                    best_1g_m_val = best_1g_indices.size(); // m_val is the size of indices, not the color
+                    best_1g_m_val = best_1g_indices.size(); 
                 }
             }
         }
-        // cerr << "Target " << i_target + 1 << ": Reuse score: " << reuse_score 
-        //      << ", Best 1g score: " << best_1g_score 
-        //      << ", Best 1g indices: " << best_1g_indices.size() 
-        //      << ", Best 1g color: (" << best_1g_mixed_color.r << ", " 
-        //      << best_1g_mixed_color.g << ", " 
-        //      << best_1g_mixed_color.b << ")" 
-        //      << std::endl;
         
+        num_blank_slots = 0;
         for (int slot_idx = 0; slot_idx < NUM_TOTAL_SLOTS; ++slot_idx) {
             if (slots[slot_idx].remaining_grams == 0) num_blank_slots++;
         }
@@ -805,20 +566,16 @@ int main() {
         bool chose_new_1g = false;
         
         double reuse_threshold_factor = 1.0; 
-        // if (num_blank_slots>0) reuse_threshold_factor = .85; // If no blank slots, prefer reuse
-        // If many blank slots, be less inclined to reuse (encourage filling slots), unless reuse is much better.
-        // if (num_blank_slots > NUM_TOTAL_SLOTS / 2) reuse_threshold_factor = 0.9; 
-        // if (num_blank_slots < NUM_TOTAL_SLOTS / 4) reuse_threshold_factor = 1.1; // Prefer reuse if slots are full
 
-        if (K_num_colors == 0 && reuse_is_possible) { // No tubes, must reuse if possible
+        if (K_num_colors == 0 && reuse_is_possible) {
              if (1 <= remaining_ops) chose_reuse = true;
-        } else if (reuse_is_possible && (best_1g_indices.empty() || (reuse_score < best_1g_score * reuse_threshold_factor))) { // Prefer reuse if it's better or if no 1g options
+        } else if (reuse_is_possible && (best_1g_indices.empty() || (reuse_score < best_1g_score * reuse_threshold_factor))) {
              if (1 <= remaining_ops) { 
                 chose_reuse = true;
              }
         }
         
-        if (!chose_reuse && !best_1g_indices.empty() && K_num_colors > 0) { // K_num_colors check for creating new
+        if (!chose_reuse && !best_1g_indices.empty() && K_num_colors > 0) {
             int ops_for_1g = best_1g_m_val + 1; 
             if (ops_for_1g <= remaining_ops) {
                 chose_new_1g = true;
@@ -826,18 +583,12 @@ int main() {
         }
         
         if (chose_reuse) {
-            int actual_row = (best_reuse_slot_idx < NUM_SLOTS_PER_HALF) ? 0 : (HORIZONTAL_DIVIDER_ROW_INDEX + 1);
-            int actual_col = best_reuse_slot_idx % NUM_SLOTS_PER_HALF;
+            auto coords = get_coords_from_slot_idx(best_reuse_slot_idx);
+            int actual_row = coords.first;
+            int actual_col = coords.second;
             operations_log.push_back("2 " + to_string(actual_row) + " " + to_string(actual_col));
-            cerr <<"reuse score: " << reuse_score << " error sqrt: " << min_reuse_error_sqrt 
-                //  << ", best reuse slot idx: " << best_reuse_slot_idx 
-                //  << ", color: (" << slots[best_reuse_slot_idx].color.r << ", " 
-                //  << slots[best_reuse_slot_idx].color.g << ", " 
-                //  << slots[best_reuse_slot_idx].color.b << ")" 
-                 
-                 << std::endl;
+            cerr <<"reuse score: " << reuse_score << " error sqrt: " << min_reuse_error_sqrt << std::endl;
             slots[best_reuse_slot_idx].remaining_grams--;
-            // Batch paint logic removed for simplicity as it was not fully active
             remaining_ops--;
         }
         else if (chose_new_1g) { 
@@ -846,7 +597,7 @@ int main() {
             
             for(int offset = 0; offset < NUM_TOTAL_SLOTS; ++offset) {
                 int temp_slot = (current_slot_idx_preference + offset) % NUM_TOTAL_SLOTS;
-                int current_val = ACTUAL_WELL_CAPACITY-slots[temp_slot].remaining_grams; // 0 for batch (lowest priority), 1 for non-batch occupied, 2 for empty
+                int current_val = ACTUAL_WELL_CAPACITY-slots[temp_slot].remaining_grams;
                 
                 if (current_val > best_val_for_slot) {
                     best_val_for_slot = current_val;
@@ -855,8 +606,9 @@ int main() {
             }
             if(slot_to_use == -1) slot_to_use = current_slot_idx_preference; // Fallback
 
-            int actual_row = (slot_to_use < NUM_SLOTS_PER_HALF) ? 0 : (HORIZONTAL_DIVIDER_ROW_INDEX + 1);
-            int actual_col = slot_to_use % NUM_SLOTS_PER_HALF;
+            auto coords = get_coords_from_slot_idx(slot_to_use);
+            int actual_row = coords.first;
+            int actual_col = coords.second;
 
             int discards_needed = slots[slot_to_use].remaining_grams;
             if (discards_needed + best_1g_m_val + 1 > remaining_ops) { 
@@ -874,24 +626,10 @@ int main() {
                 current_slot_idx_preference = (slot_to_use + 1) % NUM_TOTAL_SLOTS;
                 remaining_ops -= (best_1g_m_val + 1);
             }
-            cerr << "New1g score: " << best_1g_score 
-            << " error sqrt: " << best_1g_error_sqrt;
-            cerr << ", m_val: " << best_1g_m_val ;
-            cerr <<endl;
-            // cerr<< ", indices: ";
-            // for (int idx : best_1g_indices) {
-            //     cerr << idx << " ";
-            // }
-            // cerr << ", color: (" << best_1g_mixed_color.r << ", " 
-            //      << best_1g_mixed_color.g << ", " 
-            //      << best_1g_mixed_color.b << ")" 
-            //      << std::endl;
-                             
-
+            cerr << "New1g score: " << best_1g_score << " error sqrt: " << best_1g_error_sqrt;
+            cerr << ", m_val: " << best_1g_m_val << endl;
         }
 
-     
-        // cerr<<"remaining_ops after fallback: " << remaining_ops << std::endl;
         end_target_iteration:;
     }
 
