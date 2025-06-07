@@ -237,11 +237,11 @@ int main() {
         
     // ===== Dynamic Palette Layout Selection =====
     PaletteConfig config;
-    double d_high_thresh = 500.0, d_low_thresh = 150.0;
-    int t_low_thresh = 15000, t_high_thresh = 30000;
+    double d_high_thresh = 3000.0, d_low_thresh = 250.0;
+    int t_low_thresh = 10000, t_high_thresh = 30000;
 
     if (D < d_low_thresh && T > t_high_thresh) {
-        config = {"20x20", 20, 20, 1};
+        config = {"20x20", 20, 20, 0};
     } else if (D > d_high_thresh || T < t_low_thresh) {
         config = {"5x80", 5, 80, 0};
     } else {
@@ -360,16 +360,17 @@ int main() {
                 bool candidate_found = false;
 
                 long long combinations_approx = 1;
+                int comb_max=30000;
                 if (K > 0 && m_trial > 0) {
                     for(int i_comb=0; i_comb<m_trial; ++i_comb) {
                         if (__builtin_mul_overflow(combinations_approx, (K+m_trial-1-i_comb), &combinations_approx)) {combinations_approx = -1; break;}
                         if (combinations_approx < 0) break; 
                         combinations_approx /= (i_comb+1);
-                         if (combinations_approx < 0 || combinations_approx > 30000) {combinations_approx = -1; break;}
+                         if (combinations_approx < 0 || combinations_approx > comb_max) {combinations_approx = -1; break;}
                     }
                 } else if (m_trial == 0) combinations_approx = 1;
 
-                if (combinations_approx != -1 && combinations_approx <= 30000 ) { 
+                if (combinations_approx != -1 && combinations_approx <= comb_max) { 
                     auto exhaustive_res = select_colors_exhaustive(own_colors, mixed_target_color_obj, m_trial);
                     if (!candidate_found || get<1>(exhaustive_res) < current_m_err_sqrt_candidate) {
                         current_m_indices_candidate = get<0>(exhaustive_res);
@@ -455,13 +456,25 @@ int main() {
         else if (chose_new_1g) { 
             int slot_to_use = -1;
             int best_val_for_slot = -1; 
-            
+            double min_sum_diff = std::numeric_limits<double>::infinity();
+
             for(int offset = 0; offset < config.num_slots; ++offset) {
                 int temp_slot = (current_slot_idx_preference + offset) % config.num_slots;
-                int current_val = config.well_capacity - slots[temp_slot].remaining_grams;
-                if (current_val > best_val_for_slot) {
-                    best_val_for_slot = current_val;
+                // 他の残っているものとの違いが一番小さいスロットを選ぶ
+                if (slots[temp_slot].remaining_grams == 0) {
                     slot_to_use = temp_slot;
+                    break; 
+                }
+                double sum_diff = std::numeric_limits<double>::infinity();
+                rep(j, config.num_slots){
+                    if(j == temp_slot ) continue;
+                    auto diff = calculate_error_sqrt(slots[temp_slot].color, slots[j].color);
+                    sum_diff+= diff;
+                }
+                if (sum_diff < min_sum_diff) {
+                    min_sum_diff = sum_diff;
+                    slot_to_use = temp_slot;
+                    // best_val_for_slot = slots[temp_slot].remaining_grams;
                 }
             }
             if(slot_to_use == -1) slot_to_use = current_slot_idx_preference;
