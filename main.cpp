@@ -309,16 +309,41 @@ int main() {
        
         vector<pair<double,int>> mix_color_candidates;
         Color mixed_target_color_obj;
-        int mix_num=min(max(min((int)D/180,5),1), H - i_target);
-        FOR(j,i_target,min(H, i_target +180*mix_num)){
+        int mix_num;
+        if(D>5000){
+            mix_num = 7;
+        }else if(D>3000){
+            mix_num = 5;
+        }else if (D>1000){
+            mix_num = 3;
+        }else if (D>500){
+            mix_num = 2;
+        }else{
+            mix_num = 1;
+        }
+        mix_num=min(mix_num, H - i_target);
+        mix_num=min(mix_num, config.well_capacity);
+        vector<double>weight(mix_num);
+        double sum_weight = 0.0;
+        rep(j, mix_num){
+            // weight[j] = pow(0.9, j);
+            weight[j] = pow(0.95, j); // Slightly more aggressive discounting
+            // weight[j] = pow(1.05, j); // Slightly more aggressive discounting
+            // weight[j] = 1;
+            sum_weight += weight[j];
+        }
+        rep(j, mix_num) weight[j] /= sum_weight;
+
+
+        FOR(j,i_target,min(H, i_target +150*mix_num)){
             auto error_sqrt_j= calculate_error_sqrt(current_target_color_obj, targets[j]);
             mix_color_candidates.push_back({error_sqrt_j, j});
         }
         sort(mix_color_candidates.begin(), mix_color_candidates.end());
         rep(j,mix_num){
-            mixed_target_color_obj+= targets[mix_color_candidates[j].second];
+            mixed_target_color_obj+= targets[mix_color_candidates[j].second]* weight[j];
         }
-        mixed_target_color_obj = mixed_target_color_obj / static_cast<double>(mix_num);
+        // mixed_target_color_obj = mixed_target_color_obj / static_cast<double>(mix_num);
 
         int best_reuse_slot_idx = -1;
         double min_reuse_error_sqrt = std::numeric_limits<double>::infinity();
