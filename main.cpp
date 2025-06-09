@@ -293,14 +293,21 @@ int main() {
         // This part is kept as you provided
         double progress = static_cast<double>(i_target + 1) / H;
         double discount_factor = progress * 0.10;
-        discount_factor = 180.0/D;
+        double discount_thres;
+        if(D<1000){
+            discount_thres = 140.0;
+        }else{
+            discount_thres=180;
+        }
+     
+        discount_factor = discount_thres/D;
         
         auto current_time_chrono = std::chrono::steady_clock::now();
         double time_spent_s = std::chrono::duration<double>(current_time_chrono - overall_start_time_chrono).count();
         double remaining_time_budget_s = TOTAL_TIME_BUDGET_S - time_spent_s;
         double avg_time_per_remaining_target_ms = (H - i_target > 0) ? (remaining_time_budget_s / (H - i_target) * 1000.0) : 2.0;
         
-        double method_time_limit_ms = std::max(0.05, std::min(avg_time_per_remaining_target_ms * 0.9, 15.0)); 
+        double method_time_limit_ms = std::max(0.05, std::min(avg_time_per_remaining_target_ms , 15.0)); 
         if (remaining_time_budget_s < 0.05 * (H - i_target) && i_target < H - 1) method_time_limit_ms = 0.05;
 
         Color current_target_color_obj = targets[i_target];
@@ -311,9 +318,9 @@ int main() {
         Color mixed_target_color_obj;
         int mix_num;
         if(D>5000){
-            mix_num = 7;
-        }else if(D>3000){
             mix_num = 5;
+        }else if(D>3000){
+            mix_num = 4;
         }else if (D>1000){
             mix_num = 3;
         }else if (D>500){
@@ -327,7 +334,7 @@ int main() {
         double sum_weight = 0.0;
         rep(j, mix_num){
             // weight[j] = pow(0.9, j);
-            weight[j] = pow(0.95, j); // Slightly more aggressive discounting
+            // weight[j] = pow(0.95, j); // Slightly more aggressive discounting
             // weight[j] = pow(1.05, j); // Slightly more aggressive discounting
             // weight[j] = 1;
             sum_weight += weight[j];
@@ -340,10 +347,14 @@ int main() {
             mix_color_candidates.push_back({error_sqrt_j, j});
         }
         sort(mix_color_candidates.begin(), mix_color_candidates.end());
+        int actual_mix_num = 0;
         rep(j,mix_num){
-            mixed_target_color_obj+= targets[mix_color_candidates[j].second]* weight[j];
+            // if(mix_color_candidates[j].first <0.3){
+                mixed_target_color_obj+= targets[mix_color_candidates[j].second];
+                actual_mix_num++;
+            // }
         }
-        // mixed_target_color_obj = mixed_target_color_obj / static_cast<double>(mix_num);
+        mixed_target_color_obj = mixed_target_color_obj / (double)actual_mix_num;
 
         int best_reuse_slot_idx = -1;
         double min_reuse_error_sqrt = std::numeric_limits<double>::infinity();
@@ -429,8 +440,8 @@ int main() {
                 
                 // ===== START: SCORE CALCULATION FIX =====
                 double score_candidate;
-                if(D<180){
-                    score_candidate = current_m_err_sqrt_candidate * 10000.0 + D * (m_trial - 1); 
+                if(D<discount_thres){
+                    score_candidate = current_m_err_sqrt_candidate * 10000.0 + D*(m_trial - 1); 
                 }else{
                     score_candidate = current_m_err_sqrt_candidate * 10000.0 + D * (m_trial - 1) *  (discount_factor);
                 }
